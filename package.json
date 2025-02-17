@@ -1,0 +1,11 @@
+{
+  "name": "@komarov-ui/nodejs-oidc-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "dependencies": {
+    "express": "^4.18.2",
+    "dotenv": "^16.4.5",
+    "axios": "^1.7.7",
+    "cookie-parser": "^1.4.6"
+  }
+}
