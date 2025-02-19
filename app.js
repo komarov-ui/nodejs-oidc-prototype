@@ -3,6 +3,27 @@ const cors = require('cors');
 const express = require('express');
 const axios = require('axios');
 const cookieParser = require('cookie-parser');
+const jwtDecode = require('jwt-decode')
+
+const DEFAULT_TOKEN_PAYLOAD = {
+  id: 'sysadm',
+  exp: new Date(),
+  extensions: {
+    gitIntegration: false,
+  },
+  groups: [],
+  name: 'sysadm',
+}
+
+function getTokenPayload(token) {
+  let tokenPayload
+  try {
+    tokenPayload = toTokenPayload(jwtDecode(token))
+  } catch (e) {
+    console.error(e)
+  }
+  return tokenPayload ?? DEFAULT_TOKEN_PAYLOAD
+}
 
 const app = express();
 app.use(cookieParser());
@@ -52,7 +73,12 @@ app.get('/request-token', async (req, res) => {
       // secure: true,
     });
 
-    return res.json({ success: true })
+    const tokenExpirationTime = getTokenPayload(access_token).exp
+
+    return res.json({
+      expirationTime: tokenExpirationTime,
+      refreshToken: refresh_token
+    })
   } catch (err) {
     console.error(err);
     res.status(500).send('Token exchange failed');
