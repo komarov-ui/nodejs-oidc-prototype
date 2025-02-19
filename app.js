@@ -46,16 +46,10 @@ app.get('/request-token', async (req, res) => {
     res.cookie('access_token', access_token, {
       httpOnly: true,
       // secure: true,
-      sameSite: 'lax',
-      path: '/',
-      domain: 'localhost'
     });
     res.cookie('refresh_token', refresh_token, {
       httpOnly: true,
       // secure: true,
-      sameSite: 'lax',
-      path: '/',
-      domain: 'localhost'
     });
 
     return res.json({ success: true })
