@@ -79,15 +79,18 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const accessTokenValid = await validateToken(accessToken, 'access_token');
-  if (!accessTokenValid) {
-    return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
-  }
-
   const tokenPayload = getTokenPayload(accessToken);
   const isExpired = tokenPayload.exp < Math.floor(Date.now() / 1000);
 
   console.log('Is token expired: ', isExpired)
+
+  const isValid = await validateToken(accessToken, 'access_token');
+
+  console.log('Is token valid: ', isValid)
+
+  if (!isExpired && !isValid) {
+    return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
+  }
 
   if (isExpired) {
     try {
