@@ -41,6 +41,35 @@ const keycloakConfig = {
   redirect_uri: process.env.REDIRECT_URI
 };
 
+async function validateToken(token, tokenTypeHint) {
+  try {
+    const response = await axios.post(
+      `${keycloakConfig.url}/introspect`,
+      new URLSearchParams({
+        client_id: keycloakConfig.client_id,
+        client_secret: keycloakConfig.client_secret,
+        token: token,
+        token_type_hint: tokenTypeHint,
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+      }
+    );
+
+    const isValid = response.data.active
+
+    console.log('Validating token:', token);
+    console.log('Validation result: ', isValid);
+    return isValid;
+  } catch (error) {
+    console.error('Provided token is NOT valid. Access is prohibited. Token: ', token);
+    console.error('Token introspection details: ', error);
+  }
+  return false;
+}
+
 // Check if the access token is expired and revoke it if it is
 app.use(async (req, res, next) => {
   const accessToken = req.cookies.access_token;
@@ -48,6 +77,11 @@ app.use(async (req, res, next) => {
 
   if (!accessToken) {
     return next();
+  }
+
+  const accessTokenValid = await validateToken(accessToken, 'access_token');
+  if (!accessTokenValid) {
+    return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
   }
 
   const tokenPayload = getTokenPayload(accessToken);
