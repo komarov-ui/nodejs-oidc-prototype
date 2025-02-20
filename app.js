@@ -3,7 +3,7 @@ const cors = require('cors');
 const express = require('express');
 const axios = require('axios');
 const cookieParser = require('cookie-parser');
-const jwtDecode = require('jwt-decode')
+const { jwtDecode } = require('jwt-decode')
 
 const DEFAULT_TOKEN_PAYLOAD = {
   id: 'sysadm',
@@ -18,7 +18,7 @@ const DEFAULT_TOKEN_PAYLOAD = {
 function getTokenPayload(token) {
   let tokenPayload
   try {
-    tokenPayload = toTokenPayload(jwtDecode(token))
+    tokenPayload = jwtDecode(token)
   } catch (e) {
     console.error(e)
   }
@@ -41,25 +41,81 @@ const keycloakConfig = {
   redirect_uri: process.env.REDIRECT_URI
 };
 
+// Check if the access token is expired and revoke it if it is
+app.use(async (req, res, next) => {
+  const accessToken = req.cookies.access_token;
+  const refreshToken = req.cookies.refresh_token;
+
+  if (!accessToken) {
+    return next();
+  }
+
+  const tokenPayload = getTokenPayload(accessToken);
+  const isExpired = tokenPayload.exp < Math.floor(Date.now() / 1000);
+
+  console.log('Is token expired: ', isExpired)
+
+  if (isExpired) {
+    try {
+      // Revoke the tokens in Keycloak
+      const response = await axios.post(
+        keycloakConfig.url,
+        new URLSearchParams({
+          client_id: keycloakConfig.client_id,
+          client_secret: keycloakConfig.client_secret,
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+        }
+      );
+
+      const { access_token, refresh_token } = response.data
+
+      // Set tokens in httpOnly cookies
+      res.cookie('access_token', access_token, {
+        httpOnly: true,
+        // secure: true,
+      });
+      res.cookie('refresh_token', refresh_token, {
+        httpOnly: true,
+        // secure: true,
+      });
+    } catch (error) {
+      console.error('Error revoking tokens:', error);
+    }
+  }
+
+  next();
+});
+
 // Handle Keycloak callback
 app.get('/request-token', async (req, res) => {
   const code = req.query.code;
   if (!code) {
-    return res.status(400).send('No code provided');
+    return res.status(400).send('No authorization code provided');
   }
 
   try {
-    const response = await axios.post(keycloakConfig.url, new URLSearchParams({
-      client_id: keycloakConfig.client_id,
-      client_secret: keycloakConfig.client_secret,
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: keycloakConfig.redirect_uri
-    }), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const response = await axios.post(
+      keycloakConfig.url,
+      new URLSearchParams({
+        client_id: keycloakConfig.client_id,
+        client_secret: keycloakConfig.client_secret,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: keycloakConfig.redirect_uri,
+        scope: 'apihub-scope',
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
       }
-    });
+    );
 
     const { access_token, refresh_token } = response.data;
 
@@ -73,12 +129,7 @@ app.get('/request-token', async (req, res) => {
       // secure: true,
     });
 
-    const tokenExpirationTime = getTokenPayload(access_token).exp
-
-    return res.json({
-      expirationTime: tokenExpirationTime,
-      refreshToken: refresh_token
-    })
+    return res.json({ success: true, access_token, refresh_token })
   } catch (err) {
     console.error(err);
     res.status(500).send('Token exchange failed');
