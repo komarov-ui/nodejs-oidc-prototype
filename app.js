@@ -108,7 +108,6 @@ app.get('/request-token', async (req, res) => {
         grant_type: 'authorization_code',
         code: code,
         redirect_uri: keycloakConfig.redirect_uri,
-        scope: 'apihub-scope',
       }),
       {
         headers: {
@@ -129,7 +128,17 @@ app.get('/request-token', async (req, res) => {
       // secure: true,
     });
 
-    return res.json({ success: true, access_token, refresh_token })
+    const tokenPayload = getTokenPayload(access_token);
+
+    return res.json({
+      userInfo: {
+        name: tokenPayload.name,
+        firstName: tokenPayload.given_name,
+        lastName: tokenPayload.family_name,
+        email: tokenPayload.email,
+        emailVerified: tokenPayload.email_verified,
+      }
+    })
   } catch (err) {
     console.error(err);
     res.status(500).send('Token exchange failed');
