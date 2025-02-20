@@ -130,7 +130,7 @@ app.use(async (req, res, next) => {
 app.get('/request-token', async (req, res) => {
   const code = req.query.code;
   if (!code) {
-    return res.status(400).send('No authorization code provided');
+    return res.status(400).json({ message: 'No authorization code provided' });
   }
 
   try {
@@ -175,7 +175,7 @@ app.get('/request-token', async (req, res) => {
     })
   } catch (err) {
     console.error(err);
-    res.status(500).send('Token exchange failed');
+    res.status(500).json({ message: 'Token exchange failed' });
   }
 });
 
