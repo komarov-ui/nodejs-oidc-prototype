@@ -31,7 +31,8 @@ app.use(cookieParser());
 app.use(cors({
   origin: process.env.FRONTEND_URL,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 
 const keycloakConfig = {
@@ -89,6 +90,8 @@ app.use(async (req, res, next) => {
   console.log('Is token valid: ', isValid)
 
   if (!isExpired && !isValid) {
+    res.clearCookie('access_token');
+    res.clearCookie('refresh_token');
     return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
   }
 
@@ -123,6 +126,12 @@ app.use(async (req, res, next) => {
       });
     } catch (error) {
       console.error('Error revoking tokens:', error);
+
+      res.clearCookie('access_token');
+      res.clearCookie('refresh_token');
+      return res.status(401).json({
+        message: 'Session is expired.',
+      });
     }
   }
 
@@ -195,9 +204,7 @@ app.get('/api/protected-resource', (req, res) => {
   }
 
   return res.json({
-    authenticated: true,
-    message: 'Access token found',
-    tokenPreview: accessToken.substring(0, 10) + '...'
+    protectedData: 'This is protected data. You see it because you are authorized.'
   });
 });
 
