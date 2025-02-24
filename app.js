@@ -198,7 +198,7 @@ app.get('/request-token', async (req, res) => {
       }
     );
 
-    const { access_token, refresh_token } = response.data;
+    const { access_token, refresh_token, id_token } = response.data;
 
     // Set tokens in httpOnly cookies
     res.cookie(COOKIE_ACCESS_TOKEN, access_token, {
@@ -219,7 +219,8 @@ app.get('/request-token', async (req, res) => {
         lastName: tokenPayload.family_name,
         email: tokenPayload.email,
         emailVerified: tokenPayload.email_verified,
-      }
+      },
+      idToken: id_token,
     })
   } catch (err) {
     console.error(err);
