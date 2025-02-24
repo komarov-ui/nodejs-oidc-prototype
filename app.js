@@ -87,7 +87,7 @@ app.use(async (req, res, next) => {
   const isProtectedApi = isProtectedRoute(req.path);
 
   console.log('Path: ', req.path);
-  
+
   if (!isProtectedApi) {
     return next();
   }
@@ -224,6 +224,23 @@ app.get('/api/protected-resource', (req, res) => {
 
   return res.json({
     protectedData: 'This is protected data. You see it because you are authorized.'
+  });
+});
+
+app.get('/api/another-protected-resource', (req, res) => {
+  const accessToken = req.cookies.access_token;
+  console.log('Received cookies:', req.cookies);
+
+  if (!accessToken) {
+    return res.status(401).json({
+      authenticated: false,
+      message: 'No access token found',
+      availableCookies: Object.keys(req.cookies)
+    });
+  }
+
+  return res.json({
+    protectedData: 'This is ANOTHER protected data. You see it because you are authorized.'
   });
 });
 
