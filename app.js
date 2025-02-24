@@ -5,6 +5,12 @@ const axios = require('axios');
 const cookieParser = require('cookie-parser');
 const { jwtDecode } = require('jwt-decode')
 
+const TOKEN_TYPE_ACCESS_TOKEN = 'access_token'
+const TOKEN_TYPE_REFRESH_TOKEN = 'refresh_token'
+
+const COOKIE_ACCESS_TOKEN = TOKEN_TYPE_ACCESS_TOKEN
+const COOKIE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
+
 const DEFAULT_TOKEN_PAYLOAD = {
   id: 'sysadm',
   exp: new Date(),
@@ -35,20 +41,26 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 
-const keycloakConfig = {
-  url: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect/token`,
+const KK_GRANT_TYPE_AUTHORIZATION_CODE = 'authorization_code'
+const KK_GRANT_TYPE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
+
+const KK_CONFIG = {
+  url: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect`,
   client_id: process.env.KEYCLOAK_CLIENT_ID,
   client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
   redirect_uri: process.env.REDIRECT_URI
 };
 
+const KK_ENDPOINT_TOKEN = `${KK_CONFIG.url}/token`;
+const KK_ENDPOINT_TOKEN_INTROSPECT = `${KK_ENDPOINT_TOKEN}/introspect`;
+
 async function validateToken(token, tokenTypeHint) {
   try {
     const response = await axios.post(
-      `${keycloakConfig.url}/introspect`,
+      KK_ENDPOINT_TOKEN_INTROSPECT,
       new URLSearchParams({
-        client_id: keycloakConfig.client_id,
-        client_secret: keycloakConfig.client_secret,
+        client_id: KK_CONFIG.client_id,
+        client_secret: KK_CONFIG.client_secret,
         token: token,
         token_type_hint: tokenTypeHint,
       }),
@@ -71,7 +83,7 @@ async function validateToken(token, tokenTypeHint) {
   return false;
 }
 
-const PROTECTED_ROUTES = ['/api/']
+const PROTECTED_ROUTES = ['/api/', '/logout'];
 
 function isProtectedRoute(route) {
   return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
@@ -88,6 +100,7 @@ app.use(async (req, res, next) => {
 
   console.log('Path: ', req.path);
 
+  // If public API - skip the middleware
   if (!isProtectedApi) {
     return next();
   }
@@ -95,8 +108,10 @@ app.use(async (req, res, next) => {
   const accessToken = req.cookies.access_token;
   const refreshToken = req.cookies.refresh_token;
 
+  // if there is no provided access token, return HTTP 401 (Unauthorized)
   if (!accessToken) {
-    return next();
+    console.log('Received cookies:', req.cookies);
+    return res.status(401).send('No provided access token.');
   }
 
   const tokenPayload = getTokenPayload(accessToken);
@@ -104,25 +119,27 @@ app.use(async (req, res, next) => {
 
   console.log('Is token expired: ', isExpired)
 
-  const isValid = await validateToken(accessToken, 'access_token');
+  const isValid = await validateToken(accessToken, TOKEN_TYPE_ACCESS_TOKEN);
 
   console.log('Is token valid: ', isValid)
 
+  // If provided access token is invalid and not expired
   if (!isExpired && !isValid) {
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token');
+    res.clearCookie(COOKIE_ACCESS_TOKEN);
+    res.clearCookie(COOKIE_REFRESH_TOKEN);
     return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
   }
 
+  // If provided access token is expired
   if (isExpired) {
     try {
-      // Revoke the tokens in Keycloak
+      // Refresh the tokens in Keycloak
       const response = await axios.post(
-        keycloakConfig.url,
+        KK_ENDPOINT_TOKEN,
         new URLSearchParams({
-          client_id: keycloakConfig.client_id,
-          client_secret: keycloakConfig.client_secret,
-          grant_type: 'refresh_token',
+          client_id: KK_CONFIG.client_id,
+          client_secret: KK_CONFIG.client_secret,
+          grant_type: KK_GRANT_TYPE_REFRESH_TOKEN,
           refresh_token: refreshToken
         }),
         {
@@ -135,19 +152,19 @@ app.use(async (req, res, next) => {
       const { access_token, refresh_token } = response.data
 
       // Set tokens in httpOnly cookies
-      res.cookie('access_token', access_token, {
+      res.cookie(COOKIE_ACCESS_TOKEN, access_token, {
         httpOnly: true,
         // secure: true,
       });
-      res.cookie('refresh_token', refresh_token, {
+      res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, {
         httpOnly: true,
         // secure: true,
       });
     } catch (error) {
       console.error('Error revoking tokens:', error);
 
-      res.clearCookie('access_token');
-      res.clearCookie('refresh_token');
+      res.clearCookie(COOKIE_ACCESS_TOKEN);
+      res.clearCookie(COOKIE_REFRESH_TOKEN);
       return res.status(401).json({
         message: 'Session is expired.',
       });
@@ -157,7 +174,7 @@ app.use(async (req, res, next) => {
   next();
 });
 
-// Handle Keycloak callback
+// Require access token and refresh token from Keycloak
 app.get('/request-token', async (req, res) => {
   const code = req.query.code;
   if (!code) {
@@ -166,13 +183,13 @@ app.get('/request-token', async (req, res) => {
 
   try {
     const response = await axios.post(
-      keycloakConfig.url,
+      KK_ENDPOINT_TOKEN,
       new URLSearchParams({
-        client_id: keycloakConfig.client_id,
-        client_secret: keycloakConfig.client_secret,
-        grant_type: 'authorization_code',
+        client_id: KK_CONFIG.client_id,
+        client_secret: KK_CONFIG.client_secret,
+        grant_type: KK_GRANT_TYPE_AUTHORIZATION_CODE,
         code: code,
-        redirect_uri: keycloakConfig.redirect_uri,
+        redirect_uri: KK_CONFIG.redirect_uri,
       }),
       {
         headers: {
@@ -184,11 +201,11 @@ app.get('/request-token', async (req, res) => {
     const { access_token, refresh_token } = response.data;
 
     // Set tokens in httpOnly cookies
-    res.cookie('access_token', access_token, {
+    res.cookie(COOKIE_ACCESS_TOKEN, access_token, {
       httpOnly: true,
       // secure: true,
     });
-    res.cookie('refresh_token', refresh_token, {
+    res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, {
       httpOnly: true,
       // secure: true,
     });
@@ -210,39 +227,19 @@ app.get('/request-token', async (req, res) => {
   }
 });
 
+// Examples of protected API
 app.get('/api/protected-resource', (req, res) => {
-  const accessToken = req.cookies.access_token;
-  console.log('Received cookies:', req.cookies);
-
-  if (!accessToken) {
-    return res.status(401).json({
-      authenticated: false,
-      message: 'No access token found',
-      availableCookies: Object.keys(req.cookies)
-    });
-  }
-
   return res.json({
     protectedData: 'This is protected data. You see it because you are authorized.'
   });
 });
 
 app.get('/api/another-protected-resource', (req, res) => {
-  const accessToken = req.cookies.access_token;
-  console.log('Received cookies:', req.cookies);
-
-  if (!accessToken) {
-    return res.status(401).json({
-      authenticated: false,
-      message: 'No access token found',
-      availableCookies: Object.keys(req.cookies)
-    });
-  }
-
   return res.json({
     protectedData: 'This is ANOTHER protected data. You see it because you are authorized.'
   });
 });
 
+// Server running
 const port = 4000;
 app.listen(port, () => console.log(`Server running on http://localhost:${port}`));
