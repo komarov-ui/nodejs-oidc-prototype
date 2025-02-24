@@ -71,8 +71,27 @@ async function validateToken(token, tokenTypeHint) {
   return false;
 }
 
-// Check if the access token is expired and revoke it if it is
+const PROTECTED_ROUTES = ['/api/']
+
+function isProtectedRoute(route) {
+  return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
+}
+
+/**
+ * Middleware is supposed to check 2 things:
+ * 1. If access token is expired
+ * 2. If access token is invalid (not just expired)
+ * Middleware is enabled only for PROTECTED API.
+ */
 app.use(async (req, res, next) => {
+  const isProtectedApi = isProtectedRoute(req.path);
+
+  console.log('Path: ', req.path);
+  
+  if (!isProtectedApi) {
+    return next();
+  }
+
   const accessToken = req.cookies.access_token;
   const refreshToken = req.cookies.refresh_token;
 
