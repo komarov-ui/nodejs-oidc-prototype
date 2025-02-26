@@ -4,6 +4,35 @@ import express from 'express';
 import * as client from "openid-client";
 import fs from 'fs';
 import https from 'https';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import { jwtDecode } from 'jwt-decode';
+
+const DEFAULT_TOKEN_PAYLOAD = {
+  id: 'sysadm',
+  exp: new Date(),
+  extensions: {
+    gitIntegration: false,
+  },
+  groups: [],
+  name: 'sysadm',
+}
+
+function getTokenPayload(token) {
+  let tokenPayload
+  try {
+    tokenPayload = jwtDecode(token)
+  } catch (e) {
+    console.error(e)
+  }
+  return tokenPayload ?? DEFAULT_TOKEN_PAYLOAD
+}
+
+const TOKEN_TYPE_ACCESS_TOKEN = 'access_token'
+const TOKEN_TYPE_REFRESH_TOKEN = 'refresh_token'
+
+const COOKIE_ACCESS_TOKEN = TOKEN_TYPE_ACCESS_TOKEN
+const COOKIE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
 
 const AUTH_SERVER_URL = `${process.env.KEYCLOAK_HTTPS_URL}/realms/${process.env.KEYCLOAK_HTTPS_REALM}`
 
@@ -22,10 +51,161 @@ async function discoverAuthServerConfig() {
 
 const authServerConfiguration = await discoverAuthServerConfig();
 
+let code_challenge_method = 'S256';
+let code_verifier = client.randomPKCECodeVerifier();
+let code_challenge = await client.calculatePKCECodeChallenge(code_verifier);
+let nonce
+
 // Configuring API
 
 const app = express();
-// <TBA>
+
+// Primary configuration
+app.use(cookieParser());
+app.use(cors({
+  origin: process.env.FRONTEND_HTTPS_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+/**
+ * Middleware is supposed to check 2 things:
+ * 1. If access token is expired
+ * 2. If access token is invalid (not just expired)
+ * Middleware is enabled only for PROTECTED API.
+ */
+const PROTECTED_ROUTES = ['/api/', '/logout'];
+
+function isProtectedRoute(route) {
+  return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
+}
+
+app.use(async (req, res, next) => {
+  const isProtectedApi = isProtectedRoute(req.path);
+
+  console.log('Path: ', req.path);
+
+  // If public API - skip the middleware
+  if (!isProtectedApi) {
+    return next();
+  }
+
+  const accessToken = req.cookies.access_token;
+  const refreshToken = req.cookies.refresh_token;
+
+  // if there is no provided access token, return HTTP 401 (Unauthorized)
+  if (!accessToken) {
+    console.log('Received cookies:', req.cookies);
+    return res.status(401).send('No provided access token.');
+  }
+
+  const tokenPayload = getTokenPayload(accessToken);
+  const isExpired = tokenPayload.exp < Math.floor(Date.now() / 1000);
+
+  console.log('Is token expired: ', isExpired)
+
+  // const isValid = await validateToken(accessToken, TOKEN_TYPE_ACCESS_TOKEN);
+
+  // console.log('Is token valid: ', isValid)
+
+  // If provided access token is invalid and not expired
+  // if (!isExpired && !isValid) {
+  //   res.clearCookie(COOKIE_ACCESS_TOKEN);
+  //   res.clearCookie(COOKIE_REFRESH_TOKEN);
+  //   return res.status(401).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
+  // }
+
+  // If provided access token is expired
+  if (isExpired) {
+    try {
+      // Refresh the tokens in Keycloak
+      const token = await client.refreshTokenGrant(authServerConfiguration, refreshToken);
+
+      const { access_token, refresh_token } = token;
+
+      // Set tokens in httpOnly cookies
+      res.cookie(COOKIE_ACCESS_TOKEN, access_token, { httpOnly: true, secure: true });
+      res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, { httpOnly: true, secure: true });
+    } catch (error) {
+      console.error('Error revoking tokens:', error);
+
+      res.clearCookie(COOKIE_ACCESS_TOKEN);
+      res.clearCookie(COOKIE_REFRESH_TOKEN);
+      return res.status(401).json({
+        message: 'Session is expired.',
+      });
+    }
+  }
+
+  next();
+});
+
+app.get('/auth', async (req, res) => {
+  // redirect user to as.authorization_endpoint
+  let parameters = {
+    redirect_uri: 'https://localhost:5173/login',
+    scope: 'openid email',
+    code_challenge,
+    code_challenge_method,
+  }
+
+  /**
+   * We cannot be sure the AS supports PKCE so we're going to use nonce too. Use
+   * of PKCE is backwards compatible even if the AS doesn't support it which is
+   * why we're using it regardless.
+   */
+  if (!authServerConfiguration.serverMetadata().supportsPKCE()) {
+    console.log('PKCE not supported, using nonce');
+    nonce = client.randomNonce()
+    parameters.nonce = nonce
+  }
+
+  let redirectTo = client.buildAuthorizationUrl(authServerConfiguration, parameters)
+
+  console.log('Authorization URL:', redirectTo.href)
+  return res.json({ redirectTo: redirectTo.href })
+});
+
+app.get('/auth/token', async (req, res) => {
+  try {
+    const currentUrl = decodeURIComponent(req.query.currentUrl);
+    const token = await client.authorizationCodeGrant(
+      authServerConfiguration,
+      new URL(currentUrl),
+      {
+        pkceCodeVerifier: code_verifier,
+        expectedNonce: nonce,
+        idTokenExpected: true,
+      }
+    );
+
+    const { id_token, access_token, refresh_token } = token;
+
+    // Set tokens in httpOnly cookies
+    res.cookie(COOKIE_ACCESS_TOKEN, access_token, { httpOnly: true, secure: true });
+    res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, { httpOnly: true, secure: true });
+
+    console.log('Token:', token)
+    return res.json({ idToken: id_token });
+  } catch (err) {
+    console.error('Token exchange failed', err);
+    res.status(500).json({ message: 'Token exchange failed' });
+  }
+});
+
+// Examples of protected API
+app.get('/api/protected-resource', (req, res) => {
+  return res.json({
+    protectedData: 'This is protected data. You see it because you are authorized.'
+  });
+});
+
+app.get('/api/another-protected-resource', (req, res) => {
+  return res.json({
+    protectedData: 'This is ANOTHER protected data. You see it because you are authorized.'
+  });
+});
 
 // Running server
 
