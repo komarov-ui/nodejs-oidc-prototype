@@ -56,6 +56,26 @@ let code_verifier = client.randomPKCECodeVerifier();
 let code_challenge = await client.calculatePKCECodeChallenge(code_verifier);
 let nonce
 
+async function validateToken(token, tokenTypeHint) {
+  try {
+    const { active: isValid } = await client.tokenIntrospection(
+      authServerConfiguration,
+      token,
+      {
+        token_type_hint: tokenTypeHint,
+      }
+    );
+
+    console.log('Validating token:', token);
+    console.log('Validation result: ', isValid);
+    return isValid;
+  } catch (error) {
+    console.error('Provided token is NOT valid. Access is prohibited. Token: ', token);
+    console.error('Token introspection details: ', error);
+  }
+  return false;
+}
+
 // Configuring API
 
 const app = express();
@@ -105,16 +125,16 @@ app.use(async (req, res, next) => {
 
   console.log('Is token expired: ', isExpired)
 
-  // const isValid = await validateToken(accessToken, TOKEN_TYPE_ACCESS_TOKEN);
+  const isValid = await validateToken(accessToken, TOKEN_TYPE_ACCESS_TOKEN);
 
-  // console.log('Is token valid: ', isValid)
+  console.log('Is token valid: ', isValid)
 
   // If provided access token is invalid and not expired
-  // if (!isExpired && !isValid) {
-  //   res.clearCookie(COOKIE_ACCESS_TOKEN);
-  //   res.clearCookie(COOKIE_REFRESH_TOKEN);
-  //   return res.status(401).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
-  // }
+  if (!isExpired && !isValid) {
+    res.clearCookie(COOKIE_ACCESS_TOKEN);
+    res.clearCookie(COOKIE_REFRESH_TOKEN);
+    return res.status(401).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
+  }
 
   // If provided access token is expired
   if (isExpired) {
