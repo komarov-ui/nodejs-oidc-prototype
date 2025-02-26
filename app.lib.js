@@ -5,22 +5,22 @@ import * as client from "openid-client";
 import fs from 'fs';
 import https from 'https';
 
-const KEYCLOAK_SERVER_URL = `${process.env.KEYCLOAK_HTTPS_URL}/realms/${process.env.KEYCLOAK_HTTPS_REALM}`
+const AUTH_SERVER_URL = `${process.env.KEYCLOAK_HTTPS_URL}/realms/${process.env.KEYCLOAK_HTTPS_REALM}`
 
-async function discoverKeycloak() {
+async function discoverAuthServerConfig() {
   console.log()
-  console.log('Discovering Keycloak...', KEYCLOAK_SERVER_URL)
+  console.log('Discovering...', AUTH_SERVER_URL)
   const keycloakConfig = await client.discovery(
-    new URL(KEYCLOAK_SERVER_URL),
+    new URL(AUTH_SERVER_URL),
     process.env.KEYCLOAK_HTTPS_CLIENT_ID,
     process.env.KEYCLOAK_HTTPS_CLIENT_SECRET
   );
-  console.log('Discovered Config: ', keycloakConfig)
+  console.log('Server Metadata: ', keycloakConfig.serverMetadata())
   console.log()
   return keycloakConfig;
 }
 
-const discoveredConf = await discoverKeycloak();
+const authServerConfiguration = await discoverAuthServerConfig();
 
 // Configuring API
 
