@@ -1,5 +1,7 @@
 ### Getting Started
 
+**Documentation:** https://github.com/komarov-ui/oidc-prototype
+
 #### 1. Install packages
 
 ```
