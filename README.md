@@ -12,8 +12,6 @@ npm ci
 
 *ATTENTION*: If you already have certificate and key, you may go to step 3.
 
-<TBA>
-
 #### 3. Create folder "ssl" in root of the project
 
 #### 4. Put generated certificate and key into the folder "ssl"
