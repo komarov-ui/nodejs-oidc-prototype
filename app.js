@@ -1,15 +1,12 @@
-require('dotenv').config();
-const cors = require('cors');
-const express = require('express');
-const axios = require('axios');
-const cookieParser = require('cookie-parser');
-const { jwtDecode } = require('jwt-decode')
-
-const TOKEN_TYPE_ACCESS_TOKEN = 'access_token'
-const TOKEN_TYPE_REFRESH_TOKEN = 'refresh_token'
-
-const COOKIE_ACCESS_TOKEN = TOKEN_TYPE_ACCESS_TOKEN
-const COOKIE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
+// This is a copy of app.js with using lib "openid-client" instead of hardcoded requests
+import 'dotenv/config';
+import express from 'express';
+import * as client from "openid-client";
+import fs from 'fs';
+import https from 'https';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import { jwtDecode } from 'jwt-decode';
 
 const DEFAULT_TOKEN_PAYLOAD = {
   id: 'sysadm',
@@ -31,47 +28,43 @@ function getTokenPayload(token) {
   return tokenPayload ?? DEFAULT_TOKEN_PAYLOAD
 }
 
-const app = express();
-app.use(cookieParser());
+const TOKEN_TYPE_ACCESS_TOKEN = 'access_token'
+const TOKEN_TYPE_REFRESH_TOKEN = 'refresh_token'
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}))
+const COOKIE_ACCESS_TOKEN = TOKEN_TYPE_ACCESS_TOKEN
+const COOKIE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
 
-const KK_GRANT_TYPE_AUTHORIZATION_CODE = 'authorization_code'
-const KK_GRANT_TYPE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
+const AUTH_SERVER_URL = `${process.env.KEYCLOAK_HTTPS_URL}/realms/${process.env.KEYCLOAK_HTTPS_REALM}`
 
-const KK_CONFIG = {
-  url: `${process.env.KEYCLOAK_URL}/realms/${process.env.KEYCLOAK_REALM}/protocol/openid-connect`,
-  client_id: process.env.KEYCLOAK_CLIENT_ID,
-  client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
-  redirect_uri: process.env.REDIRECT_URI
-};
+async function discoverAuthServerConfig() {
+  console.log()
+  console.log('Discovering...', AUTH_SERVER_URL)
+  const keycloakConfig = await client.discovery(
+    new URL(AUTH_SERVER_URL),
+    process.env.KEYCLOAK_HTTPS_CLIENT_ID,
+    process.env.KEYCLOAK_HTTPS_CLIENT_SECRET
+  );
+  console.log('Server Metadata: ', keycloakConfig.serverMetadata())
+  console.log()
+  return keycloakConfig;
+}
 
-const KK_ENDPOINT_TOKEN = `${KK_CONFIG.url}/token`;
-const KK_ENDPOINT_TOKEN_INTROSPECT = `${KK_ENDPOINT_TOKEN}/introspect`;
+const authServerConfiguration = await discoverAuthServerConfig();
+
+let code_challenge_method = 'S256';
+let code_verifier = client.randomPKCECodeVerifier();
+let code_challenge = await client.calculatePKCECodeChallenge(code_verifier);
+let nonce
 
 async function validateToken(token, tokenTypeHint) {
   try {
-    const response = await axios.post(
-      KK_ENDPOINT_TOKEN_INTROSPECT,
-      new URLSearchParams({
-        client_id: KK_CONFIG.client_id,
-        client_secret: KK_CONFIG.client_secret,
-        token: token,
-        token_type_hint: tokenTypeHint,
-      }),
+    const { active: isValid } = await client.tokenIntrospection(
+      authServerConfiguration,
+      token,
       {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
+        token_type_hint: tokenTypeHint,
       }
     );
-
-    const isValid = response.data.active
 
     console.log('Validating token:', token);
     console.log('Validation result: ', isValid);
@@ -83,11 +76,18 @@ async function validateToken(token, tokenTypeHint) {
   return false;
 }
 
-const PROTECTED_ROUTES = ['/api/', '/logout'];
+// Configuring API
 
-function isProtectedRoute(route) {
-  return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
-}
+const app = express();
+
+// Primary configuration
+app.use(cookieParser());
+app.use(cors({
+  origin: process.env.FRONTEND_HTTPS_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
 /**
  * Middleware is supposed to check 2 things:
@@ -95,6 +95,12 @@ function isProtectedRoute(route) {
  * 2. If access token is invalid (not just expired)
  * Middleware is enabled only for PROTECTED API.
  */
+const PROTECTED_ROUTES = ['/api/', '/logout'];
+
+function isProtectedRoute(route) {
+  return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
+}
+
 app.use(async (req, res, next) => {
   const isProtectedApi = isProtectedRoute(req.path);
 
@@ -127,39 +133,20 @@ app.use(async (req, res, next) => {
   if (!isExpired && !isValid) {
     res.clearCookie(COOKIE_ACCESS_TOKEN);
     res.clearCookie(COOKIE_REFRESH_TOKEN);
-    return res.status(403).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
+    return res.status(401).send('Provided access token is invalid. Access blocked. See backend logs for more details.')
   }
 
   // If provided access token is expired
   if (isExpired) {
     try {
       // Refresh the tokens in Keycloak
-      const response = await axios.post(
-        KK_ENDPOINT_TOKEN,
-        new URLSearchParams({
-          client_id: KK_CONFIG.client_id,
-          client_secret: KK_CONFIG.client_secret,
-          grant_type: KK_GRANT_TYPE_REFRESH_TOKEN,
-          refresh_token: refreshToken
-        }),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-        }
-      );
+      const token = await client.refreshTokenGrant(authServerConfiguration, refreshToken);
 
-      const { access_token, refresh_token } = response.data
+      const { access_token, refresh_token } = token;
 
       // Set tokens in httpOnly cookies
-      res.cookie(COOKIE_ACCESS_TOKEN, access_token, {
-        httpOnly: true,
-        // secure: true,
-      });
-      res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, {
-        httpOnly: true,
-        // secure: true,
-      });
+      res.cookie(COOKIE_ACCESS_TOKEN, access_token, { httpOnly: true, secure: true });
+      res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, { httpOnly: true, secure: true });
     } catch (error) {
       console.error('Error revoking tokens:', error);
 
@@ -174,56 +161,55 @@ app.use(async (req, res, next) => {
   next();
 });
 
-// Require access token and refresh token from Keycloak
-app.get('/request-token', async (req, res) => {
-  const code = req.query.code;
-  if (!code) {
-    return res.status(400).json({ message: 'No authorization code provided' });
+app.get('/auth', async (req, res) => {
+  // redirect user to as.authorization_endpoint
+  let parameters = {
+    redirect_uri: 'https://localhost:5173/login',
+    scope: 'openid email',
+    code_challenge,
+    code_challenge_method,
   }
 
+  /**
+   * We cannot be sure the AS supports PKCE so we're going to use nonce too. Use
+   * of PKCE is backwards compatible even if the AS doesn't support it which is
+   * why we're using it regardless.
+   */
+  if (!authServerConfiguration.serverMetadata().supportsPKCE()) {
+    console.log('PKCE not supported, using nonce');
+    nonce = client.randomNonce()
+    parameters.nonce = nonce
+  }
+
+  let redirectTo = client.buildAuthorizationUrl(authServerConfiguration, parameters)
+
+  console.log('Authorization URL:', redirectTo.href)
+  return res.json({ redirectTo: redirectTo.href })
+});
+
+app.get('/auth/token', async (req, res) => {
   try {
-    const response = await axios.post(
-      KK_ENDPOINT_TOKEN,
-      new URLSearchParams({
-        client_id: KK_CONFIG.client_id,
-        client_secret: KK_CONFIG.client_secret,
-        grant_type: KK_GRANT_TYPE_AUTHORIZATION_CODE,
-        code: code,
-        redirect_uri: KK_CONFIG.redirect_uri,
-      }),
+    const currentUrl = decodeURIComponent(req.query.currentUrl);
+    const token = await client.authorizationCodeGrant(
+      authServerConfiguration,
+      new URL(currentUrl),
       {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
+        pkceCodeVerifier: code_verifier,
+        expectedNonce: nonce,
+        idTokenExpected: true,
       }
     );
 
-    const { access_token, refresh_token, id_token } = response.data;
+    const { id_token, access_token, refresh_token } = token;
 
     // Set tokens in httpOnly cookies
-    res.cookie(COOKIE_ACCESS_TOKEN, access_token, {
-      httpOnly: true,
-      // secure: true,
-    });
-    res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, {
-      httpOnly: true,
-      // secure: true,
-    });
+    res.cookie(COOKIE_ACCESS_TOKEN, access_token, { httpOnly: true, secure: true });
+    res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, { httpOnly: true, secure: true });
 
-    const tokenPayload = getTokenPayload(access_token);
-
-    return res.json({
-      userInfo: {
-        name: tokenPayload.name,
-        firstName: tokenPayload.given_name,
-        lastName: tokenPayload.family_name,
-        email: tokenPayload.email,
-        emailVerified: tokenPayload.email_verified,
-      },
-      idToken: id_token,
-    })
+    console.log('Token:', token)
+    return res.json({ idToken: id_token });
   } catch (err) {
-    console.error(err);
+    console.error('Token exchange failed', err);
     res.status(500).json({ message: 'Token exchange failed' });
   }
 });
@@ -241,6 +227,16 @@ app.get('/api/another-protected-resource', (req, res) => {
   });
 });
 
-// Server running
+// Running server
+
 const port = 4000;
-app.listen(port, () => console.log(`Server running on http://localhost:${port}`));
+const privateKey = fs.readFileSync('./ssl/server.key');
+const certificate = fs.readFileSync('./ssl/server.crt');
+
+https
+  .createServer({
+    key: privateKey,
+    cert: certificate
+  }, app)
+  .listen(port, () => console.log(`Server running on https://localhost:${port}`));
+
