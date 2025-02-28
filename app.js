@@ -33,6 +33,9 @@ const TOKEN_TYPE_REFRESH_TOKEN = 'refresh_token'
 
 const COOKIE_ACCESS_TOKEN = TOKEN_TYPE_ACCESS_TOKEN
 const COOKIE_REFRESH_TOKEN = TOKEN_TYPE_REFRESH_TOKEN
+const COOKIE_CODE_VERIFIER = 'code_verifier'
+const COOKIE_CODE_CHALLENGE = 'code_challenge'
+const COOKIE_NONCE = 'nonce'
 
 const AUTH_SERVER_URL = `${process.env.KEYCLOAK_HTTPS_URL}/realms/${process.env.KEYCLOAK_HTTPS_REALM}`
 
@@ -51,10 +54,7 @@ async function discoverAuthServerConfig() {
 
 const authServerConfiguration = await discoverAuthServerConfig();
 
-let code_challenge_method = 'S256';
-let code_verifier = client.randomPKCECodeVerifier();
-let code_challenge = await client.calculatePKCECodeChallenge(code_verifier);
-let nonce
+const codeChallengeMethod = 'S256';
 
 async function validateToken(token, tokenTypeHint) {
   try {
@@ -95,7 +95,7 @@ app.use(cors({
  * 2. If access token is invalid (not just expired)
  * Middleware is enabled only for PROTECTED API.
  */
-const PROTECTED_ROUTES = ['/api/', '/logout'];
+const PROTECTED_ROUTES = ['/api/'];
 
 function isProtectedRoute(route) {
   return PROTECTED_ROUTES.some(privateRoutePrefix => route.startsWith(privateRoutePrefix));
@@ -111,8 +111,8 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const accessToken = req.cookies.access_token;
-  const refreshToken = req.cookies.refresh_token;
+  const accessToken = req.cookies[COOKIE_ACCESS_TOKEN];
+  const refreshToken = req.cookies[COOKIE_REFRESH_TOKEN];
 
   // if there is no provided access token, return HTTP 401 (Unauthorized)
   if (!accessToken) {
@@ -162,13 +162,26 @@ app.use(async (req, res, next) => {
 });
 
 app.get('/auth', async (req, res) => {
-  // redirect user to as.authorization_endpoint
-  let parameters = {
-    redirect_uri: 'https://localhost:5173/login',
-    scope: 'openid email',
-    code_challenge,
-    code_challenge_method,
+  const cachedCodeVerifier = req.cookies[COOKIE_CODE_VERIFIER]
+  const cachedCodeChallenge = req.cookies[COOKIE_CODE_CHALLENGE]
+
+  const codeVerifier = cachedCodeVerifier ?? client.randomPKCECodeVerifier();
+  const codeChallenge = cachedCodeChallenge ?? await client.calculatePKCECodeChallenge(codeVerifier);
+
+  if (!cachedCodeVerifier && !cachedCodeChallenge) {
+    res.cookie(COOKIE_CODE_VERIFIER, codeVerifier, { httpOnly: true, secure: true });
+    res.cookie(COOKIE_CODE_CHALLENGE, codeChallenge, { httpOnly: true, secure: true });
   }
+
+  // redirect user to as.authorization_endpoint
+  const parameters = {
+    redirect_uri: process.env.REDIRECT_HTTPS_URI,
+    scope: 'openid email',
+    code_challenge: codeChallenge,
+    code_challenge_method: codeChallengeMethod,
+  }
+
+  let nonce
 
   /**
    * We cannot be sure the AS supports PKCE so we're going to use nonce too. Use
@@ -177,28 +190,37 @@ app.get('/auth', async (req, res) => {
    */
   if (!authServerConfiguration.serverMetadata().supportsPKCE()) {
     console.log('PKCE not supported, using nonce');
-    nonce = client.randomNonce()
+    const cachedNonce = req.cookies[COOKIE_NONCE]
+    nonce = cachedNonce ?? client.randomNonce()
+    if (!cachedNonce) {
+      res.cookie(COOKIE_NONCE, nonce, { httpOnly: true, secure: true });
+    }
     parameters.nonce = nonce
   }
 
   let redirectTo = client.buildAuthorizationUrl(authServerConfiguration, parameters)
-
   console.log('Authorization URL:', redirectTo.href)
+
   return res.json({ redirectTo: redirectTo.href })
 });
 
 app.get('/auth/token', async (req, res) => {
   try {
+    const codeVerifier = req.cookies[COOKIE_CODE_VERIFIER];
+    const nonce = req.cookies[COOKIE_NONCE];
+
     const currentUrl = decodeURIComponent(req.query.currentUrl);
     const token = await client.authorizationCodeGrant(
       authServerConfiguration,
       new URL(currentUrl),
       {
-        pkceCodeVerifier: code_verifier,
+        pkceCodeVerifier: codeVerifier,
         expectedNonce: nonce,
         idTokenExpected: true,
       }
     );
+
+    console.log('Token:', token)
 
     const { id_token, access_token, refresh_token } = token;
 
@@ -206,8 +228,14 @@ app.get('/auth/token', async (req, res) => {
     res.cookie(COOKIE_ACCESS_TOKEN, access_token, { httpOnly: true, secure: true });
     res.cookie(COOKIE_REFRESH_TOKEN, refresh_token, { httpOnly: true, secure: true });
 
-    console.log('Token:', token)
-    return res.json({ idToken: id_token });
+    res.clearCookie(COOKIE_CODE_VERIFIER);
+    res.clearCookie(COOKIE_CODE_CHALLENGE);
+    res.clearCookie(COOKIE_NONCE);
+
+    return res.json({
+      idToken: id_token,
+      userInfo: getTokenPayload(id_token),
+    });
   } catch (err) {
     console.error('Token exchange failed', err);
     res.status(500).json({ message: 'Token exchange failed' });
